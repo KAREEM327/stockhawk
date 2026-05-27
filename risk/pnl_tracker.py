@@ -23,8 +23,10 @@ from pathlib import Path
 
 import pandas as pd
 
-LOG_PATH     = Path(__file__).parent.parent / ".cache" / "pnl_log.csv"
-START_EQUITY = 100_000.0   # paper account starting value
+LOG_PATH      = Path(__file__).parent.parent / ".cache" / "pnl_log.csv"
+POS_LOG_PATH  = Path(__file__).parent.parent / ".cache" / "sh_positions.csv"
+TRADES_LOG_PATH = Path(__file__).parent.parent / ".cache" / "sh_trades.csv"
+START_EQUITY  = 100_000.0   # paper account starting value
 
 
 # ---------------------------------------------------------------------------
@@ -156,6 +158,16 @@ def record_snapshot() -> dict:
     LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
     log.to_csv(LOG_PATH, index=False)
 
+    # ── Snapshot positions + orders ───────────────────────────────────────
+    try:
+        record_positions(client)
+    except Exception as exc:
+        print(f"[Snapshot] positions log failed: {exc}")
+    try:
+        record_orders(client)
+    except Exception as exc:
+        print(f"[Snapshot] orders log failed: {exc}")
+
     # ── Export to WMS DuckDB (optional — requires DUCKDB_PATH env var) ───
     try:
         write_to_wms_db()
@@ -170,6 +182,100 @@ def record_snapshot() -> dict:
         pass
 
     return row
+
+
+# ---------------------------------------------------------------------------
+# Positions snapshot
+# ---------------------------------------------------------------------------
+
+def record_positions(client) -> None:
+    """
+    Save a snapshot of current Alpaca open positions to sh_positions.csv.
+    Each call overwrites the file (current state only — not historical).
+    """
+    positions = client.get_all_positions()
+    today = datetime.now().strftime("%Y-%m-%d")
+    rows = []
+    for p in positions:
+        rows.append({
+            "snapshot_date":       today,
+            "ticker":              p.symbol,
+            "qty":                 float(p.qty),
+            "market_value":        round(float(p.market_value), 2),
+            "avg_entry_price":     round(float(p.avg_entry_price), 4) if p.avg_entry_price else None,
+            "current_price":       round(float(p.current_price), 4)   if p.current_price  else None,
+            "unrealized_pnl":      round(float(p.unrealized_pl), 2)   if p.unrealized_pl  else 0.0,
+            "unrealized_pnl_pct":  round(float(p.unrealized_plpc) * 100, 4) if p.unrealized_plpc else 0.0,
+            "side":                str(p.side.value) if hasattr(p.side, "value") else str(p.side),
+        })
+    df = pd.DataFrame(rows) if rows else pd.DataFrame(columns=[
+        "snapshot_date", "ticker", "qty", "market_value",
+        "avg_entry_price", "current_price", "unrealized_pnl", "unrealized_pnl_pct", "side",
+    ])
+    POS_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+    df.to_csv(POS_LOG_PATH, index=False)
+    print(f"[positions] {len(rows)} positions saved to {POS_LOG_PATH.name}")
+
+
+# ---------------------------------------------------------------------------
+# Orders / trade log
+# ---------------------------------------------------------------------------
+
+def record_orders(client, days: int = 90) -> None:
+    """
+    Fetch filled orders from Alpaca and append new ones to sh_trades.csv.
+    Keeps the last `days` days of history. Idempotent — dedupes by order_id.
+    """
+    from datetime import timezone, timedelta
+    from alpaca.trading.requests import GetOrdersRequest
+    from alpaca.trading.enums import QueryOrderStatus
+
+    since = datetime.now(tz=timezone.utc) - timedelta(days=days)
+    req   = GetOrdersRequest(
+        status=QueryOrderStatus.CLOSED,
+        after=since,
+        limit=500,
+    )
+    try:
+        orders = client.get_orders(req)
+    except Exception as exc:
+        print(f"[orders] Alpaca fetch failed: {exc}")
+        return
+
+    rows = []
+    for o in orders:
+        if str(getattr(o, "status", "")) not in ("filled", "partially_filled"):
+            continue
+        rows.append({
+            "order_id":     str(o.id),
+            "filled_at":    str(o.filled_at)[:19] if o.filled_at else str(o.submitted_at)[:19],
+            "ticker":       o.symbol,
+            "side":         str(o.side.value) if hasattr(o.side, "value") else str(o.side),
+            "qty":          float(o.filled_qty)   if o.filled_qty   else 0.0,
+            "filled_price": round(float(o.filled_avg_price), 4) if o.filled_avg_price else None,
+            "notional":     round(float(o.filled_qty) * float(o.filled_avg_price), 2)
+                            if o.filled_qty and o.filled_avg_price else None,
+            "order_type":   str(o.type.value) if hasattr(o.type, "value") else str(o.type),
+            "tif":          str(o.time_in_force.value) if hasattr(o.time_in_force, "value") else str(o.time_in_force),
+        })
+
+    if not rows:
+        return
+
+    new_df = pd.DataFrame(rows)
+
+    # Merge with existing log (dedupe by order_id)
+    if TRADES_LOG_PATH.exists():
+        existing = pd.read_csv(TRADES_LOG_PATH)
+        combined = pd.concat([existing, new_df], ignore_index=True)
+        combined = combined.drop_duplicates(subset=["order_id"], keep="last")
+    else:
+        combined = new_df
+
+    combined = combined.sort_values("filled_at", ascending=False)
+    TRADES_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+    combined.to_csv(TRADES_LOG_PATH, index=False)
+    print(f"[orders] {len(rows)} orders fetched, {len(combined)} total in log")
 
 
 # ---------------------------------------------------------------------------
@@ -319,12 +425,13 @@ def push_to_gist() -> bool:
     if not LOG_PATH.exists():
         return False
 
-    content = LOG_PATH.read_text(encoding="utf-8")
-    payload = json.dumps({
-        "files": {
-            "sh_pnl_log.csv": {"content": content}
-        }
-    }).encode("utf-8")
+    files: dict = {"sh_pnl_log.csv": {"content": LOG_PATH.read_text(encoding="utf-8")}}
+    if POS_LOG_PATH.exists():
+        files["sh_positions.csv"]   = {"content": POS_LOG_PATH.read_text(encoding="utf-8")}
+    if TRADES_LOG_PATH.exists():
+        files["sh_trades.csv"]      = {"content": TRADES_LOG_PATH.read_text(encoding="utf-8")}
+
+    payload = json.dumps({"files": files}).encode("utf-8")
 
     req = urllib.request.Request(
         f"https://api.github.com/gists/{gist_id}",
