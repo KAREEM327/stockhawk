@@ -162,6 +162,13 @@ def record_snapshot() -> dict:
     except Exception:
         pass
 
+    # ── Push to GitHub Gist (Railway sync — requires GITHUB_TOKEN + SH_GIST_ID) ──
+    try:
+        if push_to_gist():
+            print("[Snapshot] Gist synced → Railway will read on next load.")
+    except Exception:
+        pass
+
     return row
 
 
@@ -282,3 +289,60 @@ def print_report() -> None:
     if pd.notna(latest.get("drawdown_from_peak_pct")):
         print(f"  Drawdown     : {latest['drawdown_from_peak_pct']:+.2f}%  (CB triggers at -18%)")
     print("=" * 65)
+
+
+# ---------------------------------------------------------------------------
+# GitHub Gist push — Railway sync
+# ---------------------------------------------------------------------------
+
+def push_to_gist() -> bool:
+    """
+    Upload the full pnl_log.csv to a private GitHub Gist so Railway WMS
+    can read it without needing direct filesystem access.
+
+    Requires:
+        GITHUB_TOKEN  — personal access token with gist scope
+        SH_GIST_ID    — ID of the private Gist (created once, reused daily)
+
+    Returns True on success.
+    """
+    import os
+    import json
+    import urllib.request
+    import urllib.error
+
+    token   = os.getenv("GITHUB_TOKEN", "").strip()
+    gist_id = os.getenv("SH_GIST_ID", "").strip()
+
+    if not token or not gist_id:
+        return False
+    if not LOG_PATH.exists():
+        return False
+
+    content = LOG_PATH.read_text(encoding="utf-8")
+    payload = json.dumps({
+        "files": {
+            "sh_pnl_log.csv": {"content": content}
+        }
+    }).encode("utf-8")
+
+    req = urllib.request.Request(
+        f"https://api.github.com/gists/{gist_id}",
+        data=payload,
+        method="PATCH",
+        headers={
+            "Authorization": f"token {token}",
+            "Content-Type": "application/json",
+            "User-Agent": "StockHawk-WMS-Sync/1.0",
+            "Accept": "application/vnd.github.v3+json",
+        },
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            return resp.status == 200
+    except urllib.error.HTTPError as exc:
+        print(f"[pnl_tracker] Gist push failed (HTTP {exc.code}): {exc.reason}")
+        return False
+    except Exception as exc:
+        print(f"[pnl_tracker] Gist push failed: {exc}")
+        return False
