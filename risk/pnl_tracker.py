@@ -155,7 +155,82 @@ def record_snapshot() -> dict:
 
     LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
     log.to_csv(LOG_PATH, index=False)
+
+    # ── Export to WMS DuckDB (optional — requires DUCKDB_PATH env var) ───
+    try:
+        write_to_wms_db()
+    except Exception:
+        pass
+
     return row
+
+
+# ---------------------------------------------------------------------------
+# WMS DuckDB export
+# ---------------------------------------------------------------------------
+
+def write_to_wms_db() -> bool:
+    """
+    Upsert all rows of pnl_log.csv into the WMS DuckDB `stock_hawk_pnl` table.
+
+    Requires DUCKDB_PATH env var to point at the WMS database file.
+    Called automatically at the end of record_snapshot(); safe to call standalone.
+    Returns True on success, False if skipped or failed.
+    """
+    import os
+    db_path_str = os.getenv("DUCKDB_PATH", "").strip()
+    if not db_path_str:
+        return False
+
+    db_path = Path(db_path_str)
+    if not db_path.exists():
+        return False
+
+    if not LOG_PATH.exists():
+        return False
+
+    try:
+        import duckdb
+        log = pd.read_csv(LOG_PATH)
+
+        con = duckdb.connect(str(db_path))
+
+        # Create table if it doesn't exist yet
+        con.execute("""
+            CREATE TABLE IF NOT EXISTS stock_hawk_pnl (
+                date                    VARCHAR,
+                equity                  DOUBLE,
+                cash                    DOUBLE,
+                n_positions             INTEGER,
+                daily_pnl               DOUBLE,
+                daily_pnl_pct           DOUBLE,
+                cum_return_pct          DOUBLE,
+                spy_close               DOUBLE,
+                spy_daily_pct           DOUBLE,
+                cum_spy_pct             DOUBLE,
+                regime                  VARCHAR,
+                drawdown_from_peak_pct  DOUBLE
+            )
+        """)
+
+        # Upsert: delete existing dates then insert all (idempotent)
+        dates_list = log["date"].astype(str).tolist()
+        if dates_list:
+            placeholders = ", ".join(["?" for _ in dates_list])
+            con.execute(
+                f"DELETE FROM stock_hawk_pnl WHERE date IN ({placeholders})",
+                dates_list,
+            )
+
+        con.register("_pnl_df", log)
+        con.execute("INSERT INTO stock_hawk_pnl SELECT * FROM _pnl_df")
+        con.close()
+        print(f"[pnl_tracker] Synced {len(log)} rows to WMS DuckDB stock_hawk_pnl.")
+        return True
+
+    except Exception as exc:
+        print(f"[pnl_tracker] WMS DuckDB write failed: {exc}")
+        return False
 
 
 # ---------------------------------------------------------------------------

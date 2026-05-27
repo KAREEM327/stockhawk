@@ -553,7 +553,8 @@ def run_live(
         _log("\n[DRY RUN] Orders computed but not submitted.")
         return
 
-    # ── Submit orders ─────────────────────────────────────────────────────
+    # ── Submit orders — sells first to free cash before buys ──────────────
+    orders.sort(key=lambda o: 0 if o["side"] == "sell" else 1)
     submitted = 0
     for o in orders:
         try:

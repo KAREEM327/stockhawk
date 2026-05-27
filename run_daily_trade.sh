@@ -5,6 +5,9 @@
 
 set -euo pipefail
 
+# Raise fd limit — launchd's SoftResourceLimits is unreliable on macOS
+ulimit -n 65536 2>/dev/null || true
+
 TRADER_DIR="/Users/blackstarr/CLAUDE COWORK/alpaca-trader"
 PYTHON="$TRADER_DIR/.venv/bin/python"
 LOG_DIR="$HOME/Library/Logs/stockhawk"
