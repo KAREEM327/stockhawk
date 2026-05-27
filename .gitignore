@@ -1,0 +1,14 @@
+.env
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+.venv/
+venv/
+*.egg-info/
+dist/
+build/
+# quantstats tearsheets + returns data (large, generated files)
+backtest/reports/
+data/cache/
+.cache/
