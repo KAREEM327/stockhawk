@@ -8,13 +8,17 @@ Three entry points:
 """
 from __future__ import annotations
 
+import os
 import sys
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
 
-_MARKOV_SCRIPTS = Path("/Users/blackstarr/CLAUDE COWORK/markov-ai-analyst/scripts")
+_MARKOV_SCRIPTS = Path(
+    os.environ.get("MARKOV_SCRIPTS_PATH")
+    or Path(__file__).parent.parent.parent / "markov-ai-analyst" / "scripts"
+)
 
 
 def _load():
@@ -81,12 +85,22 @@ def compute_markov_signal_series(
     signal_arr = np.zeros(len(idx), dtype=float)
     persist_arr = np.full(len(idx), 0.5, dtype=float)
 
+    # O(n) incremental transition count matrix — avoids O(n²) rebuild each bar.
+    counts = np.zeros((3, 3), dtype=float)
+    for k in range(min(min_train, len(label_arr) - 1)):
+        counts[label_arr[k], label_arr[k + 1]] += 1
+
     for i in range(min_train, len(label_arr)):
-        P = build_transition_matrix(pd.Series(label_arr[: i + 1]))
+        counts[label_arr[i - 1], label_arr[i]] += 1
         state = label_arr[i]
-        next_p = P[state]
-        signal_arr[i] = float(next_p[2]) - float(next_p[0])   # bull_p - bear_p
-        persist_arr[i] = float(P[0, 0])                        # P[bear→bear]
+        row = counts[state]
+        total = row.sum()
+        if total > 0:
+            next_p = row / total
+            signal_arr[i] = float(next_p[2]) - float(next_p[0])   # bull_p - bear_p
+        persist_row = counts[0]
+        bear_total = persist_row.sum()
+        persist_arr[i] = float(persist_row[0] / bear_total) if bear_total > 0 else 0.5
 
     return (
         pd.Series(signal_arr, index=idx, name="markov_signal"),

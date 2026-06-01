@@ -402,17 +402,22 @@ def run_live(
     # signal > 0.3  → Strong Bull  (pairs new entries BLOCKED; scale 1.0×)
     # signal ∈ [-0.2, 0.3] → Sideways / neutral  (full allocation; pairs open)
     # signal < -0.2 → Bear  (50% scale-down; all new positions gated)
-    import yfinance as yf
     from signals.regime_markov import get_market_regime
     pairs_markov_blocked = False
     market_regime: dict = {}
     regime_scalar = 1.0
     try:
-        spy_df = yf.download("SPY", start=start_date, end=end_date,
-                             auto_adjust=True, progress=False)
-        if isinstance(spy_df.columns, pd.MultiIndex):
-            spy_df.columns = spy_df.columns.get_level_values(0)
-        spy_close = spy_df["Close"]
+        # SPY is already in bundle["prices"] — no extra download needed.
+        prices_df = bundle["prices"]
+        if "SPY" in prices_df.columns:
+            spy_close = prices_df["SPY"].dropna()
+        else:
+            import yfinance as yf
+            spy_df = yf.download("SPY", start=start_date, end=end_date,
+                                 auto_adjust=True, progress=False)
+            if isinstance(spy_df.columns, pd.MultiIndex):
+                spy_df.columns = spy_df.columns.get_level_values(0)
+            spy_close = spy_df["Close"]
 
         market_regime = get_market_regime(close=spy_close)
         signal        = float(market_regime.get("signal", 0.0))
@@ -445,6 +450,46 @@ def run_live(
 
     except Exception as e:
         _log(f"  [markov] Could not compute ({e}) — proceeding unfiltered")
+
+    # ── Step 0b: Per-ticker Markov regime multiplier ─────────────────────
+    # Uses prices already in memory — no extra download.
+    # Bear ticker (signal < -0.2): 0.6× weight reduction.
+    # Bull ticker (signal > 0.3):  1.15× mild boost.
+    # Sideways: unchanged.
+    if final_weights and not bundle.get("prices") is None:
+        from signals.regime_markov import get_regime as _get_tkr_regime
+        prices_loaded = bundle["prices"]
+        tkr_adj: list[str] = []
+        adjusted: dict[str, float] = {}
+        for tkr, w in final_weights.items():
+            if tkr not in prices_loaded.columns:
+                adjusted[tkr] = w
+                continue
+            try:
+                res = _get_tkr_regime(tkr, close=prices_loaded[tkr].dropna())
+                sig = float(res.get("signal", 0.0))
+                if sig < -0.2:
+                    adjusted[tkr] = round(w * 0.6, 6)
+                    tkr_adj.append(f"{tkr}(Bear→0.6×)")
+                elif sig > 0.3:
+                    adjusted[tkr] = round(w * 1.15, 6)
+                    tkr_adj.append(f"{tkr}(Bull→1.15×)")
+                else:
+                    adjusted[tkr] = w
+            except Exception:
+                adjusted[tkr] = w
+        # Renormalize so weights still sum to pre-adjustment total
+        pre_total = sum(final_weights.values())
+        post_total = sum(adjusted.values())
+        if post_total > 0 and pre_total > 0:
+            scale = pre_total / post_total
+            final_weights = {t: round(v * scale, 6) for t, v in adjusted.items()}
+        else:
+            final_weights = adjusted
+        if tkr_adj:
+            _log(f"  Per-ticker regime adjustments: {', '.join(tkr_adj)}")
+        else:
+            _log("  Per-ticker regime: no individual adjustments (all Sideways)")
 
     # ── RL weight blending (runs regardless of regime success) ────────────
     rl_zip = Path(str(_rl_model_pth) + ".zip")

@@ -51,9 +51,12 @@ def _compute_spy_regime_series(spy_close: pd.Series, window: int = 20) -> pd.Dat
     """
     try:
         from signals.regime_markov import compute_markov_signal_series
-        import sys
+        import os, sys
         from pathlib import Path
-        _MARKOV_SCRIPTS = Path("/Users/blackstarr/CLAUDE COWORK/markov-ai-analyst/scripts")
+        _MARKOV_SCRIPTS = Path(
+            os.environ.get("MARKOV_SCRIPTS_PATH")
+            or Path(__file__).parent.parent.parent / "markov-ai-analyst" / "scripts"
+        )
         if str(_MARKOV_SCRIPTS) not in sys.path:
             sys.path.insert(0, str(_MARKOV_SCRIPTS))
         from markov_regime import label_regimes, build_transition_matrix
@@ -67,15 +70,23 @@ def _compute_spy_regime_series(spy_close: pd.Series, window: int = 20) -> pd.Dat
         duration_arr = np.zeros(len(idx))
         min_train = 252
 
+        # O(n) incremental transition count matrix — avoids O(n²) rebuild each bar.
+        # counts[i,j] = number of transitions from state i → state j seen so far.
+        counts = np.zeros((3, 3), dtype=float)
+        for k in range(min(min_train, len(label_arr) - 1)):
+            counts[label_arr[k], label_arr[k + 1]] += 1
+
+        run = 1  # current regime run length
         for i in range(min_train, len(label_arr)):
-            P = build_transition_matrix(pd.Series(label_arr[:i + 1]))
-            persist_bull_arr[i] = float(P[2, 2])
-            run = 1
-            for j in range(i - 1, -1, -1):
-                if label_arr[j] == label_arr[i]:
-                    run += 1
-                else:
-                    break
+            counts[label_arr[i - 1], label_arr[i]] += 1
+            row = counts[2]  # bull row
+            total = row.sum()
+            persist_bull_arr[i] = float(row[2] / total) if total > 0 else 0.5
+            # run length: reset or increment
+            if label_arr[i] == label_arr[i - 1]:
+                run += 1
+            else:
+                run = 1
             duration_arr[i] = run / 252.0
 
         return pd.DataFrame({
@@ -97,6 +108,9 @@ def _compute_features(prices: pd.DataFrame) -> pd.DataFrame:
       REV   — short-term reversal (1d / 5d negated return)
       TURN  — volume turnover momentum (5d / 20d volume ratio)
       TECH  — RSI-14 approximation, MACD signal
+      TKR   — per-ticker regime proxy features (fast, vectorized)
+                tkr_trend              — (close / 200d MA) - 1, continuous trend position
+                tkr_regime_divergence  — tkr_trend minus SPY trend (stock vs market)
 
     Returns a MultiIndex DataFrame: index = (date, ticker), columns = factors.
     """
@@ -104,6 +118,13 @@ def _compute_features(prices: pd.DataFrame) -> pd.DataFrame:
     spy_regime_df = pd.DataFrame()
     if "SPY" in prices.columns:
         spy_regime_df = _compute_spy_regime_series(prices["SPY"])
+
+    # SPY trend (200d MA ratio) for divergence feature — same vectorized approach.
+    spy_trend: pd.Series | None = None
+    if "SPY" in prices.columns:
+        spy_col = prices["SPY"].dropna()
+        ma200 = spy_col.rolling(200, min_periods=60).mean()
+        spy_trend = (spy_col / ma200 - 1).reindex(prices.index)
 
     records = []
 
@@ -152,6 +173,19 @@ def _compute_features(prices: pd.DataFrame) -> pd.DataFrame:
             df["regime_signal"]       = 0.0
             df["persist_bull"]        = 0.5
             df["regime_duration_norm"] = 0.0
+
+        # Per-ticker regime proxy features — vectorized, no HMM overhead.
+        # tkr_trend: how far above/below its own 200d MA (individual trend state).
+        # tkr_regime_divergence: ticker trend vs SPY trend (relative regime strength).
+        ma200_tkr = col.rolling(200, min_periods=60).mean()
+        tkr_trend_s = (col / ma200_tkr - 1).reindex(df.index)
+        df["tkr_trend"] = tkr_trend_s.values
+
+        if spy_trend is not None:
+            spy_aligned = spy_trend.reindex(df.index).ffill().fillna(0.0)
+            df["tkr_regime_divergence"] = (tkr_trend_s.fillna(0.0) - spy_aligned).values
+        else:
+            df["tkr_regime_divergence"] = 0.0
 
         df["ticker"] = ticker
         records.append(df.dropna())
