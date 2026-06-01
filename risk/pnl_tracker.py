@@ -244,7 +244,8 @@ def record_orders(client, days: int = 90) -> None:
 
     rows = []
     for o in orders:
-        if str(getattr(o, "status", "")) not in ("filled", "partially_filled"):
+        _status = o.status.value if hasattr(o.status, "value") else str(o.status)
+        if _status not in ("filled", "partially_filled"):
             continue
         rows.append({
             "order_id":     str(o.id),
