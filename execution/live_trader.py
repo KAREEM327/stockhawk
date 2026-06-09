@@ -144,7 +144,7 @@ def build_signal_stack(
                         batch = _yf.download(
                             cached_tickers, start=delta_start, end=end_date,
                             auto_adjust=True, progress=False, group_by="ticker",
-                            threads=True, max_workers=8,
+                            threads=True,
                         )
                     # Write each ticker's delta back to cache
                     written = 0
@@ -199,7 +199,7 @@ def build_signal_stack(
     prices = pd.DataFrame({t: df["Close"] for t, df in valid_dfs.items()}).dropna(axis=1)
 
     # ── 2. Tier 1 shortlist ──────────────────────────────────────────────
-    shortlist = get_momentum_shortlist(prices, top_pct=0.05)
+    shortlist = get_momentum_shortlist(prices, top_pct=0.10)
     momentum_ranks = {t: i + 1 for i, t in enumerate(shortlist)}
 
     # ── 3. HRP weights ───────────────────────────────────────────────────
