@@ -57,6 +57,8 @@ Alpaca paper execution (market orders at open)
 | `backtest/strategy.py` | Backtrader strategy |
 | `backtest/run.py` | Backtest runner + quantstats tearsheet |
 | `run_daily_trade.sh` | Shell wrapper for macOS LaunchAgent |
+| `docs/solutions/` | documented solutions to past problems (runtime errors, logic errors), organized by category with YAML frontmatter (`module`, `tags`, `problem_type`) |
+| `CONCEPTS.md` | shared domain vocabulary (entities, named processes, pipeline concepts) — relevant when orienting to the codebase |
 
 ## Alpha Model
 - **Features (13):** MOM5, MOM10, MOM20, MOM60, VOL5, VOL20, REV1, REV5, RSI14, MACD, regime_signal, persist_bull, regime_duration_norm
