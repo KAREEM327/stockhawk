@@ -199,13 +199,13 @@ def build_signal_stack(
     prices = pd.DataFrame({t: df["Close"] for t, df in valid_dfs.items()}).dropna(axis=1)
 
     # ── 2. Tier 1 shortlist ──────────────────────────────────────────────
-    shortlist = get_momentum_shortlist(prices, top_pct=0.10)
+    shortlist = get_momentum_shortlist(prices, top_pct=0.05)
     momentum_ranks = {t: i + 1 for i, t in enumerate(shortlist)}
 
     # ── 3. HRP weights ───────────────────────────────────────────────────
     _log("Computing HRP weights...")
     hrp_weights = compute_hrp_weights(
-        prices[shortlist], max_weight=0.15
+        prices[shortlist], max_weight=0.08
     )
 
     # ── 4. Alpha model (optional) ────────────────────────────────────────
@@ -433,8 +433,8 @@ def run_live(
             pairs_markov_blocked = True
             regime_note   = "BULL — pairs new entries blocked (mean-reversion edge weak)"
         else:
-            regime_scalar = 1.0
-            regime_note   = "SIDEWAYS / neutral — full allocation"
+            regime_scalar = 0.65
+            regime_note   = "SIDEWAYS / neutral — scaling allocations 65% (cash buffer 35%)"
 
         _log(f"Markov Regime: {regime_label} | signal={signal:+.3f} | "
              f"persist_bear={persist_bear:.2f} | {duration}d in regime")
@@ -551,6 +551,20 @@ def run_live(
         except Exception as e:
             _log(f"  [Sector cap] Unavailable: {e} — skipping")
 
+    # ── Minimum weight filter (concentration control) ─────────────────────
+    # Drop any position below 1.5% of portfolio — concentrates alpha in top
+    # ~20-25 names instead of spreading thin across 40+ positions.
+    MIN_POSITION_WEIGHT = 0.015
+    if final_weights:
+        before = len(final_weights)
+        final_weights = {t: w for t, w in final_weights.items() if w >= MIN_POSITION_WEIGHT}
+        pruned = before - len(final_weights)
+        if pruned:
+            total = sum(final_weights.values())
+            if total > 0:
+                final_weights = {t: round(w / total, 6) for t, w in final_weights.items()}
+            _log(f"  [MinWeight] Pruned {pruned} positions below {MIN_POSITION_WEIGHT:.1%} → {len(final_weights)} remaining")
+
     # ── Target allocations ────────────────────────────────────────────────
     _log("\nTarget allocations:")
     for t in sorted(final_weights, key=lambda x: -final_weights[x])[:15]:
@@ -560,7 +574,7 @@ def run_live(
 
     # ── Per-position stop-loss ────────────────────────────────────────────
     # Any open position down ≥ 15% from avg entry price is force-exited.
-    STOP_LOSS_PCT = 0.15
+    STOP_LOSS_PCT = 0.08
     try:
         open_positions = client.get_all_positions()
         stop_hits = []
