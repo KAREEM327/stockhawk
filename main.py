@@ -199,14 +199,24 @@ def cmd_train_rl():
         print("ERROR: Not enough price data.")
         return
 
-    prices    = pd.DataFrame(dfs).dropna(axis=1)
-    shortlist = get_momentum_shortlist(prices)
+    prices = pd.DataFrame(dfs).dropna(axis=1)
 
     # Cap shortlist at 50 so the PPO obs vector stays tractable (50×4+6 = 206 inputs)
     rl_cap = 50
-    if len(shortlist) > rl_cap:
-        print(f"  [RL] Capping shortlist from {len(shortlist)} → {rl_cap} (PPO tractability)")
-        shortlist = shortlist[:rl_cap]
+    if full_universe:
+        # Full universe: apply momentum filter to find the best candidates
+        shortlist = get_momentum_shortlist(prices)
+        if len(shortlist) > rl_cap:
+            print(f"  [RL] Capping shortlist from {len(shortlist)} → {rl_cap} (PPO tractability)")
+            shortlist = shortlist[:rl_cap]
+    else:
+        # Manual ticker list: user pre-selected tickers — use all of them up to cap
+        # (applying top_pct=0.10 to a small list produces too few training tickers)
+        shortlist = prices.columns.tolist()
+        if len(shortlist) > rl_cap:
+            print(f"  [RL] Capping manual list from {len(shortlist)} → {rl_cap}")
+            shortlist = shortlist[:rl_cap]
+        print(f"  [RL] Using all {len(shortlist)} provided tickers (no momentum filter on manual list)")
 
     print(f"\nTraining PPO RL sizer on {len(shortlist)} shortlisted tickers "
           f"({start} → {end}, {steps:,} steps)...")
